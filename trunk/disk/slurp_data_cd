@@ -1,0 +1,21 @@
+#!/usr/bin/perl
+use Cwd qw{ cwd };
+# Set stdout to autoflush
+$| = 1;
+my $cdrom_dev = '/media/cdrom0';
+my $dest_dir = cwd();
+while (1) {
+	my @mounted_fs = qx{mount};
+	if (grep(/$cdrom_dev/, @mounted_fs)) {
+		print "\nSlurping the CD\n";
+		system("cd $cdrom_dev; cp --no-preserve=mode,ownership -v -r . $dest_dir");
+		print "Ejecting the CD\n";
+		system('eject');
+	}
+	else {
+		$z = rand() > 0.5 ? 'Z' : 'z';
+		print $z;
+	}
+	sleep(10);
+}
+exit(0);

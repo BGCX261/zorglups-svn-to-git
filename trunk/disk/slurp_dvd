@@ -1,0 +1,155 @@
+#!/usr/bin/perl
+# TODO separate in to scripts to allow encoding queuing
+# TODO handle multi audio tracks
+# TODO handle subtitles
+use strict;
+use File::Basename;
+
+my $dvd_device = '/dev/dvd';
+my $temp_dir = '/var/tmp';
+my $hb_bin = '/usr/local/bin/HandBrakeCLI';
+my $length_difference = 25; # percent
+#my $output_dir = '~/videos';
+my $lsdvd_output = qx{/usr/bin/lsdvd -asv -Op};
+
+my $fat_divx_filename = shift;
+if (! $fat_divx_filename) {
+    die("Please give the fill path of the final divx to produce\n");
+}
+my $fat_divx_dir = dirname($fat_divx_filename);
+if ((! -d $fat_divx_dir) || (! -w $fat_divx_dir)) {
+    die("The directory '$fat_divx_dir' does not exist or is not writable\n");
+}
+
+print "DVD Scan ongoing -- Rip -- Eject -- Transcoding -- Merging -- Cleanup\n";
+
+if (! $lsdvd_output) {
+    die "Could not get the title information fron the DVD";
+}
+
+my %lsdvd;
+$lsdvd_output =~ s{^\s*\bour\b\s+%}{%};
+eval $lsdvd_output; # This export %lsdvd
+
+my $dvd_title = substr($lsdvd{title}, 0, 25);
+my $longest_track_id = $lsdvd{longest_track};
+my $longest_track_length;
+for my $track_ref (@{$lsdvd{track}}) {
+    if ($track_ref->{ix} == $longest_track_id) {
+        $longest_track_length = $track_ref->{length};
+    }
+}
+
+# Check if multi languages
+my %found_languages;
+for my $track_ref (@{$lsdvd{track}}) {
+    for my $audio_track_ref ( @{$track_ref->{audio}} ) {
+        $found_languages{$audio_track_ref->{langcode}} = $audio_track_ref->{ix};
+    }
+}
+
+my $choosen_langcode;
+while (scalar(keys %found_languages) > 1 && (! $choosen_langcode || ! grep(m{^$choosen_langcode$}, keys %found_languages)) ) {
+    print("More than one language were found:\n" . join("\n",sort keys %found_languages) . "\n");
+    print "Please enter the language of your choice: ";
+    $choosen_langcode = <STDIN>;
+    chomp($choosen_langcode);
+}
+
+
+my %selected_track_ids;
+
+for my $track_ref (@{$lsdvd{track}}) {
+    my $is_selected_track;
+    if ( $track_ref->{length} >= ($longest_track_length - ($length_difference * $longest_track_length / 100)) ) {
+        if (! $choosen_langcode) {
+            $is_selected_track = 1;
+        }
+        else {
+            for my $audio_track_ref ( @{$track_ref->{audio}} ) {
+                if ($audio_track_ref->{langcode} eq $choosen_langcode) {
+                    $is_selected_track = 1;
+                    $track_ref->{selected_audio_track} = $audio_track_ref->{ix};
+                }
+            }
+        }
+    }
+    if ($is_selected_track) {
+        $selected_track_ids{$track_ref->{ix}} = $track_ref->{selected_audio_track};
+        print "* ";
+    }
+    else {
+        print "  ";
+    }
+    print "Track " . $track_ref->{ix} . " [" . $selected_track_ids{$track_ref->{ix}} . "] : " . $track_ref->{length} . "s\n";
+}
+
+# Protection
+die("Oooops I must be lost in the filesystem...") if (! $temp_dir);
+
+print "DVD Scan done -- Rip ongoing -- Eject -- Transcoding -- Merging -- Cleanup\n";
+my $vobcopy_rc = system("mount /dev/dvd;cd $temp_dir && time nice -19 vobcopy -l -m -t ${dvd_title}_$$");
+#system("cd $temp_dir && ln -s ${dvd_title} ${dvd_title}_$$");
+
+if ($vobcopy_rc != 0) {
+    print "X" x 80 . "\n";
+    die("The DVD ripping failed.\n");
+}
+
+print "DVD Scan done -- Rip done -- Eject ongoing -- Transcoding -- Merging -- Cleanup\n";
+system("eject $dvd_device");
+print "DVD Scan done -- Rip done -- Eject done -- Transcoding ongoing -- Merging -- Cleanup\n";
+
+my $rip_dir  = $temp_dir . '/' . $dvd_title . '_' . $$;
+#my $rip_dir  = $temp_dir . '/' . $dvd_title;
+my $vob_dir  = $rip_dir . '/VIDEO_TS';
+my $divx_dir = $rip_dir . '/divx';
+END {
+    if ($rip_dir && $vob_dir && $divx_dir) {
+        print("rm -rf $vob_dir && rm -rf $divx_dir && rm -rf $rip_dir");
+    }
+}
+my %rip_rc_for_track_id;
+for my $track_ix (sort { $a <=> $b } keys(%selected_track_ids)) {
+    print "X" x 80 . "\n";
+    print "Encoding '$dvd_title' - track $track_ix [" . $selected_track_ids{$track_ix} . "]\n";
+    my $divx_filename = sprintf("%s_%s_%03d.avi", $dvd_title, $$, $track_ix);
+    my $command = "mkdir -p $divx_dir && cd $divx_dir && time nice -19 $hb_bin -i \"$vob_dir\" -o \"$divx_dir/$divx_filename\" --encoder xvid --two-pass --deinterlace slower --title $track_ix";
+    if ($selected_track_ids{$track_ix}) {
+        $command .= ' --audio "' . $selected_track_ids{$track_ix} . '"';
+    }
+    #print "mkdir -p $temp_dir/${dvd_title}_$$/divx/ && cd $temp_dir/${dvd_title}_$$/divx/ && $hb_bin -i $temp_dir/${dvd_title}_$$/VIDEO_TS -o \"${dvd_title}_$$_$track_ix.avi\" --encoder xvid -2 -d slower --title $track_ix";
+    print "# $command\n";
+    my $hb_rc = system($command);
+    $rip_rc_for_track_id{$track_ix} = $hb_rc;
+}
+
+print "X" x 80 . "\n";
+for my $track_ix (sort { $a <=> $b } keys(%selected_track_ids)) {
+    print "'$dvd_title' - track $track_ix : RIP " . 'N' x ($rip_rc_for_track_id{$track_ix} != 0) . "OK\n";
+}
+
+print "DVD Scan done -- Rip done -- Eject done -- Transcoding done -- Merging ongoing -- Cleanup\n";
+print "X" x 80 . "\n";
+if (scalar(%selected_track_ids) > 1) {
+    print "Merging all titles into one fat avi file.\n";
+    my $command = "/usr/bin/avimerge -o \"$fat_divx_filename\" -i \"$divx_dir\"/*.avi";
+    print "#$command\n";
+    my      $merge_rc = system($command);
+    if ($merge_rc != 0) {
+        die("Failed to merge titles into one big fat file '$fat_divx_filename'\n");
+    }
+}
+else {
+    print "Moving the resultiing divx to the target directory.\n";
+    my $command = "cp \"$divx_dir\"/*.avi \"$fat_divx_filename\"";
+    print "#$command\n";
+    my      $cp_rc = system($command);
+    if ($cp_rc != 0) {
+        die("Failed to copy title to the target directory '$fat_divx_filename'\n");
+    }
+}
+print "DVD Scan done -- Rip done -- Eject done -- Transcoding done -- Merging done -- Cleanup\n";
+
+
+
